@@ -19,7 +19,25 @@ const UNQUOTE_SIGNS: &[&str] = &[",", ",@"];
 enum Quoted {
     No,
     Quote,
-    Quasiquote,
+    Quasiquote(usize),
+}
+
+impl Quoted {
+    const fn quasiquote(self) -> Self {
+        match self {
+            Self::No => Self::Quasiquote(1),
+            Self::Quote => Self::Quote,
+            Self::Quasiquote(depth) => Self::Quasiquote(depth + 1),
+        }
+    }
+
+    const fn unquote(self) -> Self {
+        match self {
+            Self::Quasiquote(1) => Self::No,
+            Self::Quasiquote(depth) => Self::Quasiquote(depth - 1),
+            _ => self,
+        }
+    }
 }
 
 pub fn format<A: Allocator + Clone>(
@@ -119,9 +137,9 @@ fn compile_expression<'a, A: Allocator + Clone + 'a>(
                 expression,
                 QUOTE_SIGNS.contains(sign) || !UNQUOTE_SIGNS.contains(sign) && data,
                 match *sign {
-                    "`" => Quoted::Quasiquote,
+                    "`" => quoted.quasiquote(),
                     "'" | "#" | "#;" => Quoted::Quote,
-                    "," | ",@" => Quoted::No,
+                    "," | ",@" => quoted.unquote(),
                     _ => quoted,
                 },
             ),
@@ -149,11 +167,13 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         && (expressions.len() - 1).is_multiple_of(2);
     let children_quoted = match expressions.first() {
         Some(Expression::Symbol("quote", _)) => Quoted::Quote,
-        Some(Expression::Symbol("quasiquote", _)) => Quoted::Quasiquote,
-        Some(Expression::Symbol("unquote", _)) if quoted == Quoted::Quasiquote => Quoted::No,
+        Some(Expression::Symbol("quasiquote", _)) => quoted.quasiquote(),
+        Some(Expression::Symbol("unquote", _)) => quoted.unquote(),
         _ => quoted,
     };
-    let children_data = if quoted == Quoted::Quasiquote && children_quoted == Quoted::No {
+    let children_data = if matches!(quoted, Quoted::Quasiquote(_))
+        && matches!(expressions.first(), Some(Expression::Symbol("unquote", _)))
+    {
         false
     } else {
         data

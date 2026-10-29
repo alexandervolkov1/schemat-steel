@@ -131,6 +131,51 @@ mod tests {
     }
 
     #[test]
+    fn hash_in_quasiquote_inside_quote_remains_data() {
+        let formatted =
+            format_string("(quote (quasiquote (unquote (hash a\n b\n c\n d))))").unwrap();
+        assert!(!formatted.contains("a b"), "{formatted}");
+        assert!(!formatted.contains("c d"), "{formatted}");
+        assert_eq!(format_string(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn hash_in_nested_quasiquote_with_one_unquote_remains_data() {
+        let formatted =
+            format_string("(quasiquote (quasiquote (unquote (hash a\n b\n c\n d))))").unwrap();
+        assert!(!formatted.contains("a b"), "{formatted}");
+        assert!(!formatted.contains("c d"), "{formatted}");
+        assert_eq!(format_string(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
+    fn hash_in_nested_quasiquote_with_two_unquotes_is_code() {
+        for source in [
+            "(quasiquote (quasiquote (unquote (unquote (hash a\n b\n c\n d)))))",
+            "``(unquote ,(hash a\n b\n c\n d))",
+        ] {
+            let formatted = format_string(source).unwrap();
+            assert!(formatted.contains("a b"), "{formatted}");
+            assert!(formatted.contains("c d"), "{formatted}");
+            assert_eq!(format_string(&formatted).unwrap(), formatted);
+        }
+    }
+
+    #[test]
+    fn hash_in_mixed_nested_quotes_remains_data() {
+        for source in [
+            "'`(unquote (hash a\n b\n c\n d))",
+            "`(quasiquote ,(hash a\n b\n c\n d))",
+            "(quasiquote `(unquote (hash a\n b\n c\n d)))",
+        ] {
+            let formatted = format_string(source).unwrap();
+            assert!(!formatted.contains("a b"), "{formatted}");
+            assert!(!formatted.contains("c d"), "{formatted}");
+            assert_eq!(format_string(&formatted).unwrap(), formatted);
+        }
+    }
+
+    #[test]
     fn hash_preserves_blank_line_between_key_and_value() {
         assert_eq!(
             format_string("(other a\n\n b)").unwrap(),
