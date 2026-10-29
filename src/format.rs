@@ -58,7 +58,7 @@ fn compile_module<'a, A: Allocator + Clone + 'a>(
             )])
         },
         {
-            let expressions = compile_expressions(context, module, false);
+            let expressions = compile_expressions(context, module, false, false);
 
             if is_empty(&expressions) {
                 empty()
@@ -99,10 +99,11 @@ fn compile_expression<'a, A: Allocator + Clone + 'a>(
     context: &mut Context<'a, A>,
     expression: &'a Expression<'a>,
     data: bool,
+    quoted: bool,
 ) -> Document<'a> {
     compile_comment(context, expression.position(), |context| match expression {
         Expression::List(left, right, expressions, position) => {
-            compile_list(context, expressions, position, left, right, data)
+            compile_list(context, expressions, position, left, right, data, quoted)
         }
         Expression::Quote(sign, expression, _) => context.builder().clone().sequence([
             (*sign).into(),
@@ -110,6 +111,7 @@ fn compile_expression<'a, A: Allocator + Clone + 'a>(
                 context,
                 expression,
                 QUOTE_SIGNS.contains(sign) || !UNQUOTE_SIGNS.contains(sign) && data,
+                *sign == "#;" || !UNQUOTE_SIGNS.contains(sign) && quoted,
             ),
         ]),
         Expression::QuotedSymbol(symbol, _) => context.builder().sequence(["|", *symbol, "|"]),
@@ -125,7 +127,19 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
     left: &'a str,
     right: &'a str,
     data: bool,
+    quoted: bool,
 ) -> Document<'a> {
+    let hash = !data
+        && !quoted
+        && left == "("
+        && matches!(expressions.first(), Some(Expression::Symbol("hash", _)))
+        && expressions.len() > 1
+        && (expressions.len() - 1).is_multiple_of(2);
+    let children_quoted = quoted
+        || matches!(
+            expressions.first(),
+            Some(Expression::Symbol("quote" | "quasiquote", _))
+        );
     let index = line_index(context, position.start());
 
     let index = expressions
@@ -136,6 +150,14 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
     let last = &expressions[index..];
 
     let builder = context.builder().clone();
+    let hash_breaks = if hash {
+        expressions
+            .windows(2)
+            .map(|pair| has_intervening_line_comment(context, &pair[0], &pair[1]))
+            .collect::<alloc::vec::Vec<_>>()
+    } else {
+        alloc::vec::Vec::new()
+    };
 
     builder.sequence([
         compile_comment(
@@ -146,61 +168,61 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         builder.indent(
             builder.offside(
                 builder.sequence(
-                    [builder.flatten(compile_expressions(context, first, data))]
-                        .into_iter()
-                        .chain(match (first.last(), last.first()) {
-                            (Some(first), Some(last))
-                                if line_gap(context, first.position(), last.position()) > 1 =>
-                            {
-                                Some(line())
-                            }
-                            _ => None,
-                        })
-                        .chain(if last.is_empty() {
-                            None
-                        } else {
-                            Some(
-                                builder.r#break(
-                                    builder.sequence([
-                                        line(),
-                                        compile_expressions(context, last, data),
-                                    ]),
-                                ),
-                            )
-                        })
-                        .chain({
-                            let right_position = position.set_start(position.end() - right.len());
-                            let gap = line_gap(
-                                context,
-                                expressions
-                                    .last()
-                                    .map(Expression::position)
-                                    .unwrap_or(position),
-                                &right_position,
-                            ) > 1;
-                            let block_comment = compile_block_comment(context, &right_position);
-                            let inline_comment = compile_inline_comment(context, &right_position);
-                            let block_comment_empty = is_empty(&block_comment);
+                    [if hash {
+                        compile_hash_expressions(context, expressions, position, &hash_breaks)
+                    } else {
+                        builder.flatten(compile_expressions(context, first, data, children_quoted))
+                    }]
+                    .into_iter()
+                    .chain(match (hash, first.last(), last.first()) {
+                        (false, Some(first), Some(last))
+                            if line_gap(context, first.position(), last.position()) > 1 =>
+                        {
+                            Some(line())
+                        }
+                        _ => None,
+                    })
+                    .chain(if hash || last.is_empty() {
+                        None
+                    } else {
+                        Some(builder.r#break(builder.sequence([
+                            line(),
+                            compile_expressions(context, last, data, children_quoted),
+                        ])))
+                    })
+                    .chain({
+                        let right_position = position.set_start(position.end() - right.len());
+                        let gap = line_gap(
+                            context,
+                            expressions
+                                .last()
+                                .map(Expression::position)
+                                .unwrap_or(position),
+                            &right_position,
+                        ) > 1;
+                        let block_comment = compile_block_comment(context, &right_position);
+                        let inline_comment = compile_inline_comment(context, &right_position);
+                        let block_comment_empty = is_empty(&block_comment);
 
-                            [builder.r#break(builder.sequence([
-                                if block_comment_empty {
-                                    empty()
-                                } else {
-                                    builder.sequence([if gap { line() } else { empty() }, line()])
-                                },
-                                block_comment,
-                                if block_comment_empty
-                                    && !is_empty(&inline_comment)
-                                    && !expressions.is_empty()
-                                {
-                                    " ".into()
-                                } else {
-                                    empty()
-                                },
-                                inline_comment,
-                                right.into(),
-                            ]))]
-                        }),
+                        [builder.r#break(builder.sequence([
+                            if block_comment_empty {
+                                empty()
+                            } else {
+                                builder.sequence([if gap { line() } else { empty() }, line()])
+                            },
+                            block_comment,
+                            if block_comment_empty
+                                && !is_empty(&inline_comment)
+                                && !expressions.is_empty()
+                            {
+                                " ".into()
+                            } else {
+                                empty()
+                            },
+                            inline_comment,
+                            right.into(),
+                        ]))]
+                    }),
                 ),
                 !data,
             ),
@@ -208,10 +230,77 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
     ])
 }
 
+fn compile_hash_expressions<'a, A: Allocator + Clone + 'a>(
+    context: &mut Context<'a, A>,
+    expressions: &'a [Expression<'a>],
+    position: &Position,
+    breaks: &[bool],
+) -> Document<'a> {
+    let builder = context.builder().clone();
+    let multiline = expressions.iter().any(|expression| {
+        line_index(context, expression.position().start()) > line_index(context, position.start())
+    });
+    let mut documents = Vec::with_capacity_in(expressions.len() * 2, builder.allocator().clone());
+    let head = &expressions[0];
+    let head_document = compile_expression(context, head, false, false);
+    for (index, pair) in expressions[1..].as_chunks::<2>().0.iter().enumerate() {
+        if index > 0 {
+            documents.push(if multiline {
+                builder.r#break(line())
+            } else {
+                builder.flatten(line())
+            });
+            if line_gap(
+                context,
+                expressions[index * 2].position(),
+                pair[0].position(),
+            ) > 1
+            {
+                documents.push(builder.r#break(line()));
+            }
+        }
+        documents.push(compile_expression(context, &pair[0], false, false));
+        documents.push(if breaks[index * 2 + 1] {
+            builder.r#break(line())
+        } else {
+            builder.flatten(line())
+        });
+        documents.push(compile_expression(context, &pair[1], false, false));
+    }
+    builder.sequence([
+        head_document,
+        if breaks[0] {
+            builder.r#break(line())
+        } else {
+            builder.flatten(line())
+        },
+        builder.offside(sequence(documents.leak()), false),
+    ])
+}
+
+fn has_intervening_line_comment<A: Allocator + Clone>(
+    context: &Context<A>,
+    previous: &Expression,
+    next: &Expression,
+) -> bool {
+    context
+        .peek_comments(line_index(context, next.position().start()) + 1)
+        .any(|comment| {
+            comment.position().start() >= previous.position().end()
+                && comment.position().end() <= next.position().start()
+                && (matches!(comment, Comment::Line(_))
+                    || line_index(context, comment.position().start())
+                        > line_index(context, previous.position().end() - 1)
+                    || line_index(context, comment.position().start())
+                        != line_index(context, comment.position().end() - 1))
+        })
+}
+
 fn compile_expressions<'a, A: Allocator + Clone + 'a>(
     context: &mut Context<'a, A>,
     expressions: &'a [Expression<'a>],
     data: bool,
+    quoted: bool,
 ) -> Document<'a> {
     let mut documents =
         Vec::with_capacity_in(2 * expressions.len(), context.builder().allocator().clone());
@@ -226,7 +315,7 @@ fn compile_expressions<'a, A: Allocator + Clone + 'a>(
             }
         }
 
-        documents.push(compile_expression(context, expression, data));
+        documents.push(compile_expression(context, expression, data, quoted));
 
         last_expression = Some(expression);
     }

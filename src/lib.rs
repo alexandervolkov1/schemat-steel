@@ -57,6 +57,58 @@ mod tests {
     }
 
     #[test]
+    fn format_hash_pairs() {
+        let cases = [
+            ("(hash \"id\" id)", "(hash \"id\" id)\n"),
+            (
+                "(hash \"id\" id\n \"op\"\n \"set\"\n \"key\"\n key\n \"value\"\n value)",
+                "(hash \"id\" id\n      \"op\" \"set\"\n      \"key\" key\n      \"value\" value)\n",
+            ),
+            (
+                "(hash \"a\"\n (f x)\n \"b\"\n (hash \"c\"\n 1\n \"d\"\n 2))",
+                "(hash \"a\" (f x)\n      \"b\" (hash \"c\" 1\n                \"d\" 2))\n",
+            ),
+            (
+                "(hash \"a\" 1\n ; before key\n \"b\" #| inline |# 2)",
+                "(hash \"a\" 1\n      ; before key\n      \"b\" #| inline |# 2)\n",
+            ),
+            (
+                "(hash \"a\" ; value follows\n 1\n \"b\" 2)",
+                "(hash \"a\" ; value follows\n      1\n      \"b\" 2)\n",
+            ),
+            (
+                "(hash a\n ; value\n b\n c d)",
+                "(hash a\n      ; value\n      b\n      c d)\n",
+            ),
+            (
+                "(hash a\n #| value |#\n b\n c d)",
+                "(hash a\n      #|\n      value\n      |#\n      b\n      c d)\n",
+            ),
+            ("(hash ; head\n a b\n c d)", "(hash ; head\n  a b\n  c d)\n"),
+            (
+                "(hash a\n (f x\n y)\n b c)",
+                "(hash a (f x\n         y)\n      b c)\n",
+            ),
+            ("(hash a\n b\n c)", "(hash a\n  b\n  c)\n"),
+            ("'(hash a\n b\n c\n d)", "'(hash a\n  b\n  c\n  d)\n"),
+            (
+                "(quote (hash a\n b\n c\n d))",
+                "(quote (hash a\n        b\n        c\n        d))\n",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let formatted = format_string(source).unwrap();
+            assert_eq!(formatted, expected, "source: {source}");
+            assert_eq!(
+                format_string(&formatted).unwrap(),
+                formatted,
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn fail_to_format_unclosed_list() {
         assert!(matches!(format_string("(foo"), Err(Error::Parse(_))));
     }
