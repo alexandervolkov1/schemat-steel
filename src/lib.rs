@@ -57,6 +57,74 @@ mod tests {
     }
 
     #[test]
+    fn format_if_branches() {
+        for (source, expected) in [
+            ("(if condition yes no)", "(if condition yes no)\n"),
+            (
+                "(if (> remaining 1)\n (time/sleep-ms pause-ms)\n #t)",
+                "(if (> remaining 1)\n    (time/sleep-ms pause-ms)\n    #t)\n",
+            ),
+            (
+                "(if ready?\n (if (> x 0)\n (start)\n (stop))\n (wait))",
+                "(if ready?\n    (if (> x 0)\n        (start)\n        (stop))\n    (wait))\n",
+            ),
+            (
+                "(if (and ready?\n valid?)\n (start)\n (stop))",
+                "(if (and ready?\n     valid?)\n    (start)\n    (stop))\n",
+            ),
+            (
+                "(if\n condition\n yes\n no)",
+                "(if\n  condition\n    yes\n    no)\n",
+            ),
+            (
+                "(if ready? ; condition\n ; then\n (start)\n\n ; else\n (stop))",
+                "(if ready? ; condition\n    ; then\n    (start)\n\n    ; else\n    (stop))\n",
+            ),
+            (
+                "'(if condition\n yes\n no)",
+                "'(if condition\n  yes\n  no)\n",
+            ),
+            (
+                "(foo (if condition\n yes\n no))",
+                "(foo (if condition\n         yes\n         no))\n",
+            ),
+            (
+                "(if test\n #| choose |# yes\n no)",
+                "(if test\n    #| choose |# yes\n    no)\n",
+            ),
+            (
+                "(if test\n yes ; done\n no)",
+                "(if test\n    yes ; done\n    no)\n",
+            ),
+            (
+                "(if ; condition follows\n test\n yes\n no)",
+                "(if ; condition follows\n  test\n    yes\n    no)\n",
+            ),
+            (
+                "(if test\n yes\n no ; final\n)",
+                "(if test\n    yes\n    no) ; final\n",
+            ),
+            ("(if test\n\n yes\n no)", "(if test\n\n    yes\n    no)\n"),
+            (
+                "(quasiquote (if condition\n yes\n no))",
+                "(quasiquote (if condition\n             yes\n             no))\n",
+            ),
+            (
+                "(quasiquote (unquote (if condition\n yes\n no)))",
+                "(quasiquote (unquote (if condition\n                         yes\n                         no)))\n",
+            ),
+        ] {
+            let formatted = format_string(source).unwrap();
+            assert_eq!(formatted, expected, "source: {source}");
+            assert_eq!(
+                format_string(&formatted).unwrap(),
+                formatted,
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn format_hash_pairs() {
         let cases = [
             ("(hash \"id\" id)", "(hash \"id\" id)\n"),

@@ -165,6 +165,11 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         && matches!(expressions.first(), Some(Expression::Symbol("hash", _)))
         && expressions.len() > 1
         && (expressions.len() - 1).is_multiple_of(2);
+    let if_form = !data
+        && quoted == Quoted::No
+        && left == "("
+        && matches!(expressions.first(), Some(Expression::Symbol("if", _)))
+        && (3..=4).contains(&expressions.len());
     let children_quoted = match expressions.first() {
         Some(Expression::Symbol("quote", _)) => Quoted::Quote,
         Some(Expression::Symbol("quasiquote", _)) => quoted.quasiquote(),
@@ -197,7 +202,7 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         alloc::vec::Vec::new()
     };
 
-    builder.sequence([
+    let document = builder.sequence([
         compile_comment(
             context,
             &position.set_end(position.start() + left.len()),
@@ -219,7 +224,8 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                     .into_iter()
                     .chain(match (hash, first.last(), last.first()) {
                         (false, Some(first), Some(last))
-                            if line_gap(context, first.position(), last.position()) > 1 =>
+                            if !if_form
+                                && line_gap(context, first.position(), last.position()) > 1 =>
                         {
                             Some(line())
                         }
@@ -227,6 +233,8 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                     })
                     .chain(if hash || last.is_empty() {
                         None
+                    } else if if_form {
+                        Some(compile_if_remaining(context, expressions, index))
                     } else {
                         Some(builder.r#break(builder.sequence([
                             line(),
@@ -270,7 +278,41 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                 !data,
             ),
         ),
-    ])
+    ]);
+    if if_form {
+        builder.offside(document, false)
+    } else {
+        document
+    }
+}
+
+fn compile_if_remaining<'a, A: Allocator + Clone + 'a>(
+    context: &mut Context<'a, A>,
+    expressions: &'a [Expression<'a>],
+    start: usize,
+) -> Document<'a> {
+    let builder = context.builder().clone();
+    let mut documents =
+        Vec::with_capacity_in(expressions.len() - start, builder.allocator().clone());
+    for (index, expression) in expressions.iter().enumerate().skip(start) {
+        let gap = index > 0
+            && line_gap(
+                context,
+                expressions[index - 1].position(),
+                expression.position(),
+            ) > 1;
+        let document = builder.sequence([
+            line(),
+            if gap { line() } else { empty() },
+            compile_expression(context, expression, false, Quoted::No),
+        ]);
+        documents.push(if index >= 2 {
+            builder.indent(document)
+        } else {
+            document
+        });
+    }
+    builder.r#break(sequence(documents.leak()))
 }
 
 fn compile_hash_expressions<'a, A: Allocator + Clone + 'a>(
