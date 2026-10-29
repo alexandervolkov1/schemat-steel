@@ -109,6 +109,51 @@ mod tests {
     }
 
     #[test]
+    fn hash_in_named_quasiquote_and_unquote() {
+        for (source, expected) in [
+            (
+                "(quasiquote (hash a\n b\n c\n d))",
+                "(quasiquote (hash a\n             b\n             c\n             d))\n",
+            ),
+            (
+                "(quasiquote (unquote (hash a\n b\n c\n d)))",
+                "(quasiquote (unquote (hash a b\n                           c d)))\n",
+            ),
+            (
+                "(quote (unquote (hash a\n b\n c\n d)))",
+                "(quote (unquote (hash a\n                 b\n                 c\n                 d)))\n",
+            ),
+        ] {
+            let formatted = format_string(source).unwrap();
+            assert_eq!(formatted, expected, "source: {source}");
+            assert_eq!(format_string(&formatted).unwrap(), formatted);
+        }
+    }
+
+    #[test]
+    fn hash_preserves_blank_line_between_key_and_value() {
+        assert_eq!(
+            format_string("(other a\n\n b)").unwrap(),
+            "(other a\n\n  b)\n"
+        );
+        for (source, expected) in [
+            ("(hash a\n\n b\n c d)", "(hash a\n\n      b\n      c d)\n"),
+            ("(hash a\n\n\n b\n c d)", "(hash a\n\n      b\n      c d)\n"),
+            (
+                "(hash a\n\n ; value\n b\n c d)",
+                "(hash a\n\n      ; value\n      b\n      c d)\n",
+            ),
+            (
+                "(hash a\n ; value\n\n b\n c d)",
+                "(hash a\n      ; value\n\n      b\n      c d)\n",
+            ),
+        ] {
+            assert_eq!(format_string(source).unwrap(), expected, "source: {source}");
+            assert_eq!(format_string(expected).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn fail_to_format_unclosed_list() {
         assert!(matches!(format_string("(foo"), Err(Error::Parse(_))));
     }

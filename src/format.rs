@@ -15,6 +15,13 @@ const COMMENT_PREFIX: &str = ";";
 const QUOTE_SIGNS: &[&str] = &["'", "`", "#"];
 const UNQUOTE_SIGNS: &[&str] = &[",", ",@"];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quoted {
+    No,
+    Quote,
+    Quasiquote,
+}
+
 pub fn format<A: Allocator + Clone>(
     module: &[Expression],
     comments: &[Comment],
@@ -58,7 +65,7 @@ fn compile_module<'a, A: Allocator + Clone + 'a>(
             )])
         },
         {
-            let expressions = compile_expressions(context, module, false, false);
+            let expressions = compile_expressions(context, module, false, Quoted::No);
 
             if is_empty(&expressions) {
                 empty()
@@ -99,7 +106,7 @@ fn compile_expression<'a, A: Allocator + Clone + 'a>(
     context: &mut Context<'a, A>,
     expression: &'a Expression<'a>,
     data: bool,
-    quoted: bool,
+    quoted: Quoted,
 ) -> Document<'a> {
     compile_comment(context, expression.position(), |context| match expression {
         Expression::List(left, right, expressions, position) => {
@@ -111,7 +118,12 @@ fn compile_expression<'a, A: Allocator + Clone + 'a>(
                 context,
                 expression,
                 QUOTE_SIGNS.contains(sign) || !UNQUOTE_SIGNS.contains(sign) && data,
-                *sign == "#;" || !UNQUOTE_SIGNS.contains(sign) && quoted,
+                match *sign {
+                    "`" => Quoted::Quasiquote,
+                    "'" | "#" | "#;" => Quoted::Quote,
+                    "," | ",@" => Quoted::No,
+                    _ => quoted,
+                },
             ),
         ]),
         Expression::QuotedSymbol(symbol, _) => context.builder().sequence(["|", *symbol, "|"]),
@@ -127,19 +139,25 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
     left: &'a str,
     right: &'a str,
     data: bool,
-    quoted: bool,
+    quoted: Quoted,
 ) -> Document<'a> {
     let hash = !data
-        && !quoted
+        && quoted == Quoted::No
         && left == "("
         && matches!(expressions.first(), Some(Expression::Symbol("hash", _)))
         && expressions.len() > 1
         && (expressions.len() - 1).is_multiple_of(2);
-    let children_quoted = quoted
-        || matches!(
-            expressions.first(),
-            Some(Expression::Symbol("quote" | "quasiquote", _))
-        );
+    let children_quoted = match expressions.first() {
+        Some(Expression::Symbol("quote", _)) => Quoted::Quote,
+        Some(Expression::Symbol("quasiquote", _)) => Quoted::Quasiquote,
+        Some(Expression::Symbol("unquote", _)) if quoted == Quoted::Quasiquote => Quoted::No,
+        _ => quoted,
+    };
+    let children_data = if quoted == Quoted::Quasiquote && children_quoted == Quoted::No {
+        false
+    } else {
+        data
+    };
     let index = line_index(context, position.start());
 
     let index = expressions
@@ -171,7 +189,12 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                     [if hash {
                         compile_hash_expressions(context, expressions, position, &hash_breaks)
                     } else {
-                        builder.flatten(compile_expressions(context, first, data, children_quoted))
+                        builder.flatten(compile_expressions(
+                            context,
+                            first,
+                            children_data,
+                            children_quoted,
+                        ))
                     }]
                     .into_iter()
                     .chain(match (hash, first.last(), last.first()) {
@@ -187,7 +210,7 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                     } else {
                         Some(builder.r#break(builder.sequence([
                             line(),
-                            compile_expressions(context, last, data, children_quoted),
+                            compile_expressions(context, last, children_data, children_quoted),
                         ])))
                     })
                     .chain({
@@ -242,7 +265,7 @@ fn compile_hash_expressions<'a, A: Allocator + Clone + 'a>(
     });
     let mut documents = Vec::with_capacity_in(expressions.len() * 2, builder.allocator().clone());
     let head = &expressions[0];
-    let head_document = compile_expression(context, head, false, false);
+    let head_document = compile_expression(context, head, false, Quoted::No);
     for (index, pair) in expressions[1..].as_chunks::<2>().0.iter().enumerate() {
         if index > 0 {
             documents.push(if multiline {
@@ -259,13 +282,17 @@ fn compile_hash_expressions<'a, A: Allocator + Clone + 'a>(
                 documents.push(builder.r#break(line()));
             }
         }
-        documents.push(compile_expression(context, &pair[0], false, false));
-        documents.push(if breaks[index * 2 + 1] {
+        let blank_line = line_gap(context, pair[0].position(), pair[1].position()) > 1;
+        documents.push(compile_expression(context, &pair[0], false, Quoted::No));
+        documents.push(if breaks[index * 2 + 1] || blank_line {
             builder.r#break(line())
         } else {
             builder.flatten(line())
         });
-        documents.push(compile_expression(context, &pair[1], false, false));
+        if blank_line {
+            documents.push(builder.r#break(line()));
+        }
+        documents.push(compile_expression(context, &pair[1], false, Quoted::No));
     }
     builder.sequence([
         head_document,
@@ -300,7 +327,7 @@ fn compile_expressions<'a, A: Allocator + Clone + 'a>(
     context: &mut Context<'a, A>,
     expressions: &'a [Expression<'a>],
     data: bool,
-    quoted: bool,
+    quoted: Quoted,
 ) -> Document<'a> {
     let mut documents =
         Vec::with_capacity_in(2 * expressions.len(), context.builder().allocator().clone());
