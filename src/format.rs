@@ -170,6 +170,27 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         && left == "("
         && matches!(expressions.first(), Some(Expression::Symbol("if", _)))
         && (3..=4).contains(&expressions.len());
+    let code = !data
+        && quoted == Quoted::No
+        && !hash
+        && !if_form
+        && !matches!(
+            expressions.first(),
+            Some(Expression::Symbol("quote" | "quasiquote" | "unquote", _))
+        );
+    let body_form = code
+        && (matches!(
+            expressions.first(),
+            Some(Expression::Symbol(
+                "define" | "lambda" | "let" | "let*" | "letrec",
+                _
+            ))
+        ) || matches!(expressions.first(), Some(Expression::Symbol("begin", _)))
+            && expressions.get(1).is_some_and(|expression| {
+                line_index(context, expression.position().start())
+                    > line_index(context, position.start())
+            }));
+    let lambda = code && matches!(expressions.first(), Some(Expression::Symbol("lambda", _)));
     let children_quoted = match expressions.first() {
         Some(Expression::Symbol("quote", _)) => Quoted::Quote,
         Some(Expression::Symbol("quasiquote", _)) => quoted.quasiquote(),
@@ -191,6 +212,10 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         .unwrap_or(expressions.len());
     let first = &expressions[..index];
     let last = &expressions[index..];
+    let call = code
+        && !body_form
+        && first.len() >= 2
+        && matches!(expressions.first(), Some(Expression::Symbol(_, _)));
 
     let builder = context.builder().clone();
     let hash_breaks = if hash {
@@ -213,6 +238,14 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                 builder.sequence(
                     [if hash {
                         compile_hash_expressions(context, expressions, position, &hash_breaks)
+                    } else if call {
+                        compile_call_expressions(
+                            context,
+                            expressions,
+                            index,
+                            children_data,
+                            children_quoted,
+                        )
                     } else {
                         builder.flatten(compile_expressions(
                             context,
@@ -225,16 +258,19 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                     .chain(match (hash, first.last(), last.first()) {
                         (false, Some(first), Some(last))
                             if !if_form
+                                && !call
                                 && line_gap(context, first.position(), last.position()) > 1 =>
                         {
                             Some(line())
                         }
                         _ => None,
                     })
-                    .chain(if hash || last.is_empty() {
+                    .chain(if hash || last.is_empty() || call {
                         None
                     } else if if_form {
                         Some(compile_if_remaining(context, expressions, index))
+                    } else if lambda && index <= 1 {
+                        Some(compile_lambda_remaining(context, expressions, index))
                     } else {
                         Some(builder.r#break(builder.sequence([
                             line(),
@@ -275,15 +311,83 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                         ]))]
                     }),
                 ),
-                !data,
+                !data && !(code && !body_form),
             ),
         ),
     ]);
-    if if_form {
+    if if_form || body_form {
         builder.offside(document, false)
     } else {
         document
     }
+}
+
+fn compile_call_expressions<'a, A: Allocator + Clone + 'a>(
+    context: &mut Context<'a, A>,
+    expressions: &'a [Expression<'a>],
+    index: usize,
+    data: bool,
+    quoted: Quoted,
+) -> Document<'a> {
+    let builder = context.builder().clone();
+    let head = compile_expression(context, &expressions[0], data, quoted);
+    let first = compile_expressions(context, &expressions[1..index], data, quoted);
+    let gap = index < expressions.len()
+        && line_gap(
+            context,
+            expressions[index - 1].position(),
+            expressions[index].position(),
+        ) > 1;
+    let last = compile_expressions(context, &expressions[index..], data, quoted);
+    builder.sequence([
+        head,
+        builder.flatten(line()),
+        builder.offside(
+            builder.sequence([
+                builder.flatten(first),
+                if gap {
+                    builder.r#break(line())
+                } else {
+                    empty()
+                },
+                if index < expressions.len() {
+                    builder.r#break(builder.sequence([line(), last]))
+                } else {
+                    empty()
+                },
+            ]),
+            false,
+        ),
+    ])
+}
+
+fn compile_lambda_remaining<'a, A: Allocator + Clone + 'a>(
+    context: &mut Context<'a, A>,
+    expressions: &'a [Expression<'a>],
+    start: usize,
+) -> Document<'a> {
+    let builder = context.builder().clone();
+    let mut documents =
+        Vec::with_capacity_in(expressions.len() - start, builder.allocator().clone());
+    for (index, expression) in expressions.iter().enumerate().skip(start) {
+        let gap = index > 0
+            && line_gap(
+                context,
+                expressions[index - 1].position(),
+                expression.position(),
+            ) > 1;
+        let document = builder.sequence([
+            line(),
+            if gap { line() } else { empty() },
+            compile_expression(context, expression, false, Quoted::No),
+        ]);
+        documents.push(if index == 1 {
+            builder.indent(document)
+        } else {
+            document
+        });
+    }
+    builder.r#break(sequence(documents.leak()))
 }
 
 fn compile_if_remaining<'a, A: Allocator + Clone + 'a>(
@@ -626,7 +730,7 @@ mod tests {
             indoc!(
                 "
                 (foo
-                  bar)
+                 bar)
                 "
             )
         );
@@ -655,8 +759,8 @@ mod tests {
             indoc!(
                 "
                 (foo bar
-                  baz
-                  qux)
+                     baz
+                     qux)
                 "
             )
         );
@@ -806,7 +910,7 @@ mod tests {
                 indoc!(
                     "
                     ((foo
-                        bar))
+                      bar))
                     "
                 )
             );
@@ -833,7 +937,7 @@ mod tests {
                 indoc!(
                     "
                     (foo
-                      bar)
+                     bar)
                     "
                 )
             );
@@ -861,7 +965,7 @@ mod tests {
                     "
                     (foo
 
-                      bar)
+                     bar)
                     "
                 )
             );
@@ -896,9 +1000,9 @@ mod tests {
                 indoc!(
                     "
                     ((foo
-                        bar)
+                      bar)
 
-                      baz)
+                     baz)
                     "
                 )
             );
@@ -922,7 +1026,7 @@ mod tests {
                 indoc!(
                     "
                     (
-                      foo)
+                     foo)
                     "
                 )
             );
@@ -954,7 +1058,7 @@ mod tests {
                 indoc!(
                     "
                     ((foo
-                        bar))
+                      bar))
                     "
                 )
             );
@@ -1182,8 +1286,8 @@ mod tests {
                 indoc!(
                     "
                     (foo
-                      ;bar
-                      baz)
+                     ;bar
+                     baz)
                     "
                 )
             );
@@ -1246,7 +1350,7 @@ mod tests {
                 indoc!(
                     "
                     ( ;bar
-                      foo)
+                     foo)
                     "
                 )
             );
@@ -1273,8 +1377,8 @@ mod tests {
                 indoc!(
                     "
                     (f
-                      ;foo
-                      x)
+                     ;foo
+                     x)
                     "
                 )
             );
@@ -1373,10 +1477,10 @@ mod tests {
                 indoc!(
                     "
                     (foo
-                      bar
-                      ;baz
-                      ;qux
-                      )
+                     bar
+                     ;baz
+                     ;qux
+                     )
                     "
                 )
             );
@@ -1408,10 +1512,10 @@ mod tests {
                 indoc!(
                     "
                     (foo
-                      bar
-                      ;baz
-                      ;qux
-                      #|quux|# #|blah|#)
+                     bar
+                     ;baz
+                     ;qux
+                     #|quux|# #|blah|#)
                     "
                 )
             );
@@ -1482,10 +1586,10 @@ mod tests {
                     indoc!(
                         "
                     (foo
-                      bar
+                     bar
 
-                      ;baz
-                      )
+                     ;baz
+                     )
                     "
                     )
                 );
@@ -1543,7 +1647,7 @@ mod tests {
                     indoc!(
                         "
                         (foo
-                          bar) ;baz
+                         bar) ;baz
                         "
                     )
                 );
@@ -1571,7 +1675,7 @@ mod tests {
                         "
                         (foo
 
-                          bar) ;baz
+                         bar) ;baz
                         "
                     )
                 );
@@ -1627,7 +1731,7 @@ mod tests {
                     indoc!(
                         "
                         (foo
-                          bar #|bar|#) ;baz
+                         bar #|bar|#) ;baz
                         "
                     )
                 );
@@ -2193,7 +2297,7 @@ mod tests {
                     indoc!(
                         "
                         ,((foo
-                            bar))
+                           bar))
                         "
                     )
                 );

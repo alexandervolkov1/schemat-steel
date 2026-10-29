@@ -56,6 +56,139 @@ mod tests {
         assert_eq!(format_string("( foo  bar )").unwrap(), "(foo bar)\n");
     }
 
+    fn assert_scheme_format(source: &str, expected: &str) {
+        let formatted = format_string(source).unwrap();
+        assert_eq!(formatted, expected, "source: {source}");
+        assert_eq!(
+            format_string(&formatted).unwrap(),
+            formatted,
+            "source: {source}"
+        );
+    }
+
+    #[test]
+    fn scheme_call_indentation() {
+        for (source, expected) in [
+            (
+                "(compute first\n second\n (nested x\n y))",
+                "(compute first\n         second\n         (nested x\n                 y))\n",
+            ),
+            (
+                "(long-function\n first\n second)",
+                "(long-function\n first\n second)\n",
+            ),
+            ("(f a\n b)", "(f a\n   b)\n"),
+        ] {
+            assert_scheme_format(source, expected);
+        }
+    }
+
+    #[test]
+    fn scheme_call_indentation_after_unicode() {
+        assert_scheme_format("(λ first\n second)", "(λ first\n   second)\n");
+        assert_scheme_format("(f \"λ\" (g a\n b))", "(f \"λ\" (g a\n          b))\n");
+        assert_scheme_format("(ж first\n second)", "(ж first\n   second)\n");
+        assert_scheme_format("(漢 first\n second)", "(漢 first\n    second)\n");
+        assert_scheme_format("(e\u{301} first\n second)", "(e\u{301} first\n   second)\n");
+        assert_scheme_format(
+            "(f λ (g first\n second))",
+            "(f λ (g first\n        second))\n",
+        );
+        assert_scheme_format(
+            "(hash \"a\nb\" (g first\n second))",
+            "(hash \"a\nb\" (g first\n      second))\n",
+        );
+    }
+
+    #[test]
+    fn scheme_definition_indentation() {
+        for (source, expected) in [
+            (
+                "(define answer\n (compute x\n y))",
+                "(define answer\n  (compute x\n           y))\n",
+            ),
+            (
+                "(define (process x y)\n (display x)\n (combine x y))",
+                "(define (process x y)\n  (display x)\n  (combine x y))\n",
+            ),
+            (
+                "(begin (define (f x)\n (display x)\n (+ x 1))\n (f 1))",
+                "(begin (define (f x)\n         (display x)\n         (+ x 1))\n       (f 1))\n",
+            ),
+            (
+                "(begin\n (define x 1)\n x)",
+                "(begin\n  (define x 1)\n  x)\n",
+            ),
+        ] {
+            assert_scheme_format(source, expected);
+        }
+    }
+
+    #[test]
+    fn scheme_lambda_indentation() {
+        for (source, expected) in [
+            (
+                "(map (lambda (x)\n (display x)\n (+ x 1))\n xs)",
+                "(map (lambda (x)\n       (display x)\n       (+ x 1))\n     xs)\n",
+            ),
+            (
+                "(lambda\n (x y)\n (display x)\n (+ x y))",
+                "(lambda\n    (x y)\n  (display x)\n  (+ x y))\n",
+            ),
+            ("(lambda (x) (+ x 1))", "(lambda (x) (+ x 1))\n"),
+        ] {
+            assert_scheme_format(source, expected);
+        }
+    }
+
+    #[test]
+    fn scheme_binding_indentation() {
+        for (source, expected) in [
+            (
+                "(f (let ((x 1)\n (y 2))\n (+ x y)))",
+                "(f (let ((x 1)\n         (y 2))\n     (+ x y)))\n",
+            ),
+            (
+                "(let\n ((x 1)\n (y 2))\n (+ x y))",
+                "(let\n  ((x 1)\n   (y 2))\n  (+ x y))\n",
+            ),
+            (
+                "(let*\n ((x 1)\n (y 2))\n (+ x y))",
+                "(let*\n  ((x 1)\n   (y 2))\n  (+ x y))\n",
+            ),
+            (
+                "(letrec\n ((x 1)\n (y 2))\n (+ x y))",
+                "(letrec\n  ((x 1)\n   (y 2))\n  (+ x y))\n",
+            ),
+            (
+                "(let loop\n ((n 3)\n (acc 0))\n (loop (- n 1) acc))",
+                "(let loop\n  ((n 3)\n   (acc 0))\n  (loop (- n 1) acc))\n",
+            ),
+            (
+                "(define (work x)\n (let* ((a (prepare x))\n (f (lambda (v)\n (display v)\n (finish v))))\n (f a)))",
+                "(define (work x)\n  (let* ((a (prepare x))\n         (f (lambda (v)\n              (display v)\n              (finish v))))\n    (f a)))\n",
+            ),
+        ] {
+            assert_scheme_format(source, expected);
+        }
+    }
+
+    #[test]
+    fn scheme_comments_and_blank_lines() {
+        for (source, expected) in [
+            (
+                "(f first ; first\n ; next\n second\n\n third)",
+                "(f first ; first\n   ; next\n   second\n\n   third)\n",
+            ),
+            (
+                "(let ((x 1)\n ; binding\n (y 2))\n #| body |#\n (+ x y))",
+                "(let ((x 1)\n      ; binding\n      (y 2))\n  #|\n  body\n  |#\n  (+ x y))\n",
+            ),
+        ] {
+            assert_scheme_format(source, expected);
+        }
+    }
+
     #[test]
     fn format_if_branches() {
         for (source, expected) in [
@@ -70,7 +203,7 @@ mod tests {
             ),
             (
                 "(if (and ready?\n valid?)\n (start)\n (stop))",
-                "(if (and ready?\n     valid?)\n    (start)\n    (stop))\n",
+                "(if (and ready?\n         valid?)\n    (start)\n    (stop))\n",
             ),
             (
                 "(if\n condition\n yes\n no)",
@@ -155,9 +288,9 @@ mod tests {
             ("(hash ; head\n a b\n c d)", "(hash ; head\n  a b\n  c d)\n"),
             (
                 "(hash a\n (f x\n y)\n b c)",
-                "(hash a (f x\n         y)\n      b c)\n",
+                "(hash a (f x\n           y)\n      b c)\n",
             ),
-            ("(hash a\n b\n c)", "(hash a\n  b\n  c)\n"),
+            ("(hash a\n b\n c)", "(hash a\n      b\n      c)\n"),
             ("'(hash a\n b\n c\n d)", "'(hash a\n  b\n  c\n  d)\n"),
             (
                 "(quote (hash a\n b\n c\n d))",
@@ -247,7 +380,7 @@ mod tests {
     fn hash_preserves_blank_line_between_key_and_value() {
         assert_eq!(
             format_string("(other a\n\n b)").unwrap(),
-            "(other a\n\n  b)\n"
+            "(other a\n\n       b)\n"
         );
         for (source, expected) in [
             ("(hash a\n\n b\n c d)", "(hash a\n\n      b\n      c d)\n"),
