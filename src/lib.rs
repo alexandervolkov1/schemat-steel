@@ -56,6 +56,83 @@ mod tests {
         assert_eq!(format_string("( foo  bar )").unwrap(), "(foo bar)\n");
     }
 
+    #[test]
+    fn format_steel_special_forms() {
+        for (source, expected) in [
+            (
+                "(define-syntax my-when\n (syntax-rules ()\n ((_ condition body ...)\n (if condition\n (begin body ...)))))",
+                "(define-syntax my-when\n  (syntax-rules ()\n    ((_ condition body ...)\n     (if condition\n         (begin body ...)))))\n",
+            ),
+            (
+                "(cond\n [(positive? x)\n (display x)\n x]\n [else 0])",
+                "(cond\n  [(positive? x)\n   (display x)\n   x]\n  [else 0])\n",
+            ),
+            (
+                "(case x\n [(1 2) 'small]\n [else 'other])",
+                "(case x\n  [(1 2) 'small]\n  [else 'other])\n",
+            ),
+            (
+                "(case (hash a\n b\n c\n d)\n [(hash a\n b\n c\n d) 'match]\n [else #f])",
+                "(case (hash a b\n            c d)\n  [(hash a\n     b\n     c\n     d)\n   'match]\n  [else #f])\n",
+            ),
+            (
+                "(when ready?\n (start)\n (notify))",
+                "(when ready?\n  (start)\n  (notify))\n",
+            ),
+            ("(unless ready?\n (wait))", "(unless ready?\n  (wait))\n"),
+            (
+                "(begin-for-syntax\n (define x 1)\n (define y 2))",
+                "(begin-for-syntax\n  (define x 1)\n  (define y 2))\n",
+            ),
+            (
+                "(syntax-case stx ()\n [(_ x)\n #'x])",
+                "(syntax-case stx ()\n  [(_ x)\n   #'x])\n",
+            ),
+        ] {
+            assert_scheme_format(source, expected);
+        }
+    }
+
+    #[test]
+    fn format_macro_patterns_as_data() {
+        assert_scheme_format(
+            "(define-syntax m\n (syntax-rules ()\n ((if x\n y\n z)\n (if x\n y\n z))))",
+            "(define-syntax m\n  (syntax-rules ()\n    ((if x\n       y\n       z)\n     (if x\n         y\n         z))))\n",
+        );
+        assert_scheme_format(
+            "(syntax-case stx ()\n [(hash a\n b\n c\n d)\n (if ok\n yes\n no)])",
+            "(syntax-case stx ()\n  [(hash a\n     b\n     c\n     d)\n   (if ok\n       yes\n       no)])\n",
+        );
+        assert_scheme_format(
+            "(define-syntax m\n (syntax-rules ()\n ((_ (if x\n y\n z))\n (quote (hash a\n b\n c\n d)))))",
+            "(define-syntax m\n  (syntax-rules ()\n    ((_ (if x\n         y\n         z))\n     (quote (hash a\n             b\n             c\n             d)))))\n",
+        );
+        assert_scheme_format(
+            "(syntax-rules ()\n ((_ x)\n (if x\n (hash a\n b\n c\n d)\n #f)))",
+            "(syntax-rules ()\n  ((_ x)\n   (if x\n       (hash a\n             b\n             c\n             d)\n       #f)))\n",
+        );
+    }
+
+    #[test]
+    fn format_macro_comments_and_multiline_templates() {
+        assert_scheme_format(
+            "(define-syntax m\n (syntax-rules (else)\n ; first\n ((_ x)\n (if x\n (f a\n b)\n #f))\n\n #| second |#\n ((_ x y)\n (list x y))))",
+            "(define-syntax m\n  (syntax-rules (else)\n    ; first\n    ((_ x)\n     (if x\n         (f a\n            b)\n         #f))\n\n    #|\n    second\n    |#\n    ((_ x y)\n     (list x y))))\n",
+        );
+    }
+
+    #[test]
+    fn quoted_special_forms_remain_data() {
+        assert_scheme_format(
+            "'(cond\n (if a\n b\n c)\n (hash a\n b\n c\n d))",
+            "'(cond\n  (if a\n   b\n   c)\n  (hash a\n   b\n   c\n   d))\n",
+        );
+        assert_scheme_format(
+            "(quasiquote (when x\n (if a\n b\n c)))",
+            "(quasiquote (when x\n             (if a\n               b\n               c)))\n",
+        );
+    }
+
     fn assert_scheme_format(source: &str, expected: &str) {
         let formatted = format_string(source).unwrap();
         assert_eq!(formatted, expected, "source: {source}");

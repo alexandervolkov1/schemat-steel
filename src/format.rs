@@ -20,6 +20,8 @@ enum Quoted {
     No,
     Quote,
     Quasiquote(usize),
+    MacroClause(bool),
+    MacroTemplate,
 }
 
 impl Quoted {
@@ -28,6 +30,8 @@ impl Quoted {
             Self::No => Self::Quasiquote(1),
             Self::Quote => Self::Quote,
             Self::Quasiquote(depth) => Self::Quasiquote(depth + 1),
+            Self::MacroClause(rule) => Self::MacroClause(rule),
+            Self::MacroTemplate => Self::Quasiquote(1),
         }
     }
 
@@ -166,12 +170,12 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         && expressions.len() > 1
         && (expressions.len() - 1).is_multiple_of(2);
     let if_form = !data
-        && quoted == Quoted::No
+        && matches!(quoted, Quoted::No | Quoted::MacroTemplate)
         && left == "("
         && matches!(expressions.first(), Some(Expression::Symbol("if", _)))
         && (3..=4).contains(&expressions.len());
     let code = !data
-        && quoted == Quoted::No
+        && matches!(quoted, Quoted::No | Quoted::MacroTemplate)
         && !hash
         && !if_form
         && !matches!(
@@ -182,7 +186,19 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
         && (matches!(
             expressions.first(),
             Some(Expression::Symbol(
-                "define" | "lambda" | "let" | "let*" | "letrec",
+                "define"
+                    | "define-syntax"
+                    | "lambda"
+                    | "let"
+                    | "let*"
+                    | "letrec"
+                    | "syntax-rules"
+                    | "syntax-case"
+                    | "cond"
+                    | "case"
+                    | "when"
+                    | "unless"
+                    | "begin-for-syntax",
                 _
             ))
         ) || matches!(expressions.first(), Some(Expression::Symbol("begin", _)))
@@ -191,6 +207,19 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                     > line_index(context, position.start())
             }));
     let lambda = code && matches!(expressions.first(), Some(Expression::Symbol("lambda", _)));
+    // Last header index, whether clauses contain syntax templates, and whether
+    // the last header is a list of literal identifiers.
+    let clause_info = if code {
+        match expressions.first() {
+            Some(Expression::Symbol("syntax-rules", _)) => Some((1, true, true)),
+            Some(Expression::Symbol("syntax-case", _)) => Some((2, false, true)),
+            Some(Expression::Symbol("case", _)) => Some((1, false, false)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let macro_clause = matches!(quoted, Quoted::MacroClause(_));
     let children_quoted = match expressions.first() {
         Some(Expression::Symbol("quote", _)) => Quoted::Quote,
         Some(Expression::Symbol("quasiquote", _)) => quoted.quasiquote(),
@@ -246,6 +275,14 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                             children_data,
                             children_quoted,
                         )
+                    } else if clause_info.is_some() || macro_clause {
+                        builder.flatten(compile_clause_expressions(
+                            context,
+                            first,
+                            0,
+                            clause_info,
+                            quoted,
+                        ))
                     } else {
                         builder.flatten(compile_expressions(
                             context,
@@ -268,9 +305,19 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                     .chain(if hash || last.is_empty() || call {
                         None
                     } else if if_form {
-                        Some(compile_if_remaining(context, expressions, index))
+                        Some(compile_if_remaining(context, expressions, index, quoted))
                     } else if lambda && index <= 1 {
-                        Some(compile_lambda_remaining(context, expressions, index))
+                        Some(compile_lambda_remaining(
+                            context,
+                            expressions,
+                            index,
+                            quoted,
+                        ))
+                    } else if clause_info.is_some() || macro_clause {
+                        Some(builder.r#break(builder.sequence([
+                            line(),
+                            compile_clause_expressions(context, last, index, clause_info, quoted),
+                        ])))
                     } else {
                         Some(builder.r#break(builder.sequence([
                             line(),
@@ -311,7 +358,7 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
                         ]))]
                     }),
                 ),
-                !data && !(code && !body_form),
+                !data && !(code && !body_form) && !macro_clause,
             ),
         ),
     ]);
@@ -320,6 +367,46 @@ fn compile_list<'a, A: Allocator + Clone + 'a>(
     } else {
         document
     }
+}
+
+fn compile_clause_expressions<'a, A: Allocator + Clone + 'a>(
+    context: &mut Context<'a, A>,
+    expressions: &'a [Expression<'a>],
+    start: usize,
+    literals: Option<(usize, bool, bool)>,
+    mode: Quoted,
+) -> Document<'a> {
+    let builder = context.builder().clone();
+    let mut documents = Vec::with_capacity_in(expressions.len() * 2, builder.allocator().clone());
+    for (offset, expression) in expressions.iter().enumerate() {
+        if offset > 0 {
+            documents.push(line());
+            if line_gap(
+                context,
+                expressions[offset - 1].position(),
+                expression.position(),
+            ) > 1
+            {
+                documents.push(line());
+            }
+        }
+        let index = start + offset;
+        let quoted = if matches!(mode, Quoted::MacroClause(_)) && index == 0
+            || literals.is_some_and(|(literal_index, _, is_data)| is_data && literal_index == index)
+        {
+            Quoted::Quote
+        } else if literals.is_some_and(|(literal_index, _, _)| index > literal_index)
+            && matches!(expression, Expression::List(..))
+        {
+            Quoted::MacroClause(literals.expect("macro literals").1)
+        } else if mode == Quoted::MacroClause(true) {
+            Quoted::MacroTemplate
+        } else {
+            Quoted::No
+        };
+        documents.push(compile_expression(context, expression, false, quoted));
+    }
+    sequence(documents.leak())
 }
 
 fn compile_call_expressions<'a, A: Allocator + Clone + 'a>(
@@ -365,6 +452,7 @@ fn compile_lambda_remaining<'a, A: Allocator + Clone + 'a>(
     context: &mut Context<'a, A>,
     expressions: &'a [Expression<'a>],
     start: usize,
+    quoted: Quoted,
 ) -> Document<'a> {
     let builder = context.builder().clone();
     let mut documents =
@@ -379,7 +467,7 @@ fn compile_lambda_remaining<'a, A: Allocator + Clone + 'a>(
         let document = builder.sequence([
             line(),
             if gap { line() } else { empty() },
-            compile_expression(context, expression, false, Quoted::No),
+            compile_expression(context, expression, false, quoted),
         ]);
         documents.push(if index == 1 {
             builder.indent(document)
@@ -394,6 +482,7 @@ fn compile_if_remaining<'a, A: Allocator + Clone + 'a>(
     context: &mut Context<'a, A>,
     expressions: &'a [Expression<'a>],
     start: usize,
+    quoted: Quoted,
 ) -> Document<'a> {
     let builder = context.builder().clone();
     let mut documents =
@@ -408,7 +497,7 @@ fn compile_if_remaining<'a, A: Allocator + Clone + 'a>(
         let document = builder.sequence([
             line(),
             if gap { line() } else { empty() },
-            compile_expression(context, expression, false, Quoted::No),
+            compile_expression(context, expression, false, quoted),
         ]);
         documents.push(if index >= 2 {
             builder.indent(document)
